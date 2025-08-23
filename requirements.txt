@@ -10,7 +10,7 @@ fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 nest-asyncio>=1.5.0
 pydantic>=2.0.0
-
+nest_asyncio
 # HTTP client for testing
 requests>=2.31.0
 
