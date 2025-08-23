@@ -1,0 +1,25 @@
+# Core dependencies for YouTube Transcriber API
+yt-dlp>=2024.1.0
+transformers>=4.30.0
+torch>=2.0.0
+torchaudio>=2.0.0
+moviepy>=1.0.3
+
+# FastAPI and server dependencies
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+nest-asyncio>=1.5.0
+pydantic>=2.0.0
+
+# HTTP client for testing
+requests>=2.31.0
+
+# Optional: For better performance with CUDA
+# Uncomment the following lines if you have CUDA support
+# torch>=2.0.0+cu118
+# torchaudio>=2.0.0+cu118
+
+# System dependencies (install via system package manager)
+# Ubuntu/Debian: sudo apt update && sudo apt install ffmpeg
+# macOS: brew install ffmpeg
+# Windows: Download from https://ffmpeg.org/
