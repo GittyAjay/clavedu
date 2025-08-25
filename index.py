@@ -1,20 +1,17 @@
 """
-Enhanced YouTube Audio Transcriber API
+Enhanced YouTube Audio Transcriber API - Render Optimized
 FastAPI-based API with cookie support to bypass YouTube bot detection
 
-Installation required:
-!pip install yt-dlp transformers torch moviepy fastapi uvicorn nest-asyncio browser-cookie3
-
-New Features:
-- Automatic cookie extraction from browsers
-- Multiple fallback strategies for YouTube access
-- Better error handling and retry mechanisms
-- Support for age-restricted and private videos
+Render-specific optimizations:
+- Automatic cookie detection for Render environment
+- Fallback strategies that work on servers
+- Environment variable support for manual cookies
+- Disabled browser cookie extraction on Render
 
 Usage:
-1. Run this code
-2. The API will be available at http://localhost:8000
-3. Use the /transcribe endpoint with a POST request containing the YouTube URL
+1. Deploy to Render
+2. Set YOUTUBE_COOKIES environment variable if needed
+3. API will be available at your Render URL
 """
 
 import yt_dlp
@@ -39,14 +36,25 @@ import requests
 import sys
 import subprocess
 import platform
+import logging
 
-# Try to import browser cookie extraction
-try:
-    import browser_cookie3
-    BROWSER_COOKIES_AVAILABLE = True
-except ImportError:
-    BROWSER_COOKIES_AVAILABLE = False
-    print("⚠️ browser_cookie3 not installed. Run: pip install browser_cookie3")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Try to import browser cookie extraction (disabled on Render)
+IS_RENDER = os.environ.get('RENDER', False)
+BROWSER_COOKIES_AVAILABLE = False
+
+if not IS_RENDER:
+    try:
+        import browser_cookie3
+        BROWSER_COOKIES_AVAILABLE = True
+    except ImportError:
+        BROWSER_COOKIES_AVAILABLE = False
+        print("⚠️ browser_cookie3 not installed. Run: pip install browser-cookie3")
+else:
+    print("🔧 Render environment detected - disabling browser cookie extraction")
 
 # Enable nested asyncio for Colab/Jupyter
 nest_asyncio.apply()
@@ -57,7 +65,7 @@ class TranscriptionRequest(BaseModel):
     output_format: Optional[str] = "text"  # "text", "json", or "both"
     chunk_length_s: Optional[int] = 30
     include_timestamps: Optional[bool] = True
-    use_cookies: Optional[bool] = True  # New option
+    use_cookies: Optional[bool] = not IS_RENDER  # Auto-disable on Render
     browser: Optional[str] = "chrome"  # chrome, firefox, safari, edge
 
 class TranscriptionResponse(BaseModel):
@@ -73,7 +81,7 @@ class YouTubeTranscriberAPI:
         self.app = FastAPI(
             title="Enhanced YouTube Transcriber API",
             description="API for transcribing YouTube videos using Whisper with cookie support",
-            version="2.0.0"
+            version="2.1.0"
         )
         
         # Add CORS middleware
@@ -91,6 +99,7 @@ class YouTubeTranscriberAPI:
         self.setup_routes()
 
         print(f"🚀 Enhanced API initialized with device: {self.device}")
+        print(f"🏭 Render environment: {'✅' if IS_RENDER else '❌'}")
         print(f"🍪 Browser cookies support: {'✅' if BROWSER_COOKIES_AVAILABLE else '❌'}")
         print("✅ CORS middleware enabled")
 
@@ -102,6 +111,7 @@ class YouTubeTranscriberAPI:
             return {
                 "message": "Enhanced YouTube Transcriber API",
                 "status": "running",
+                "environment": "render" if IS_RENDER else "local",
                 "cors_enabled": True,
                 "cookie_support": BROWSER_COOKIES_AVAILABLE
             }
@@ -111,6 +121,7 @@ class YouTubeTranscriberAPI:
             return {
                 "status": "healthy",
                 "device": self.device,
+                "environment": "render" if IS_RENDER else "local",
                 "models_loaded": list(self.models.keys()),
                 "cors_enabled": True,
                 "cookie_support": BROWSER_COOKIES_AVAILABLE
@@ -182,6 +193,17 @@ class YouTubeTranscriberAPI:
                     "message": "FFmpeg check timed out"
                 }
 
+        @self.app.get("/environment")
+        async def environment_info():
+            """Get information about the current environment"""
+            return {
+                "is_render": IS_RENDER,
+                "browser_cookies_available": BROWSER_COOKIES_AVAILABLE,
+                "python_version": sys.version,
+                "platform": platform.platform(),
+                "device": self.device
+            }
+
         @self.app.options("/{path:path}")
         async def options_handler(path: str):
             return JSONResponse(
@@ -193,13 +215,47 @@ class YouTubeTranscriberAPI:
                 }
             )
 
+    def get_render_cookie_options(self):
+        """Get cookie options for Render deployment"""
+        # Try to use a pre-uploaded cookie file
+        cookie_paths = [
+            "/etc/render/cookies.txt",
+            "/app/cookies.txt", 
+            "./cookies.txt",
+            "/tmp/cookies.txt"
+        ]
+        
+        for path in cookie_paths:
+            if os.path.exists(path):
+                logger.info(f"Found cookie file at {path}")
+                return {'cookiefile': path}
+        
+        # Fallback: try environment variable with cookie content
+        cookie_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookie_content:
+            try:
+                temp_dir = tempfile.mkdtemp()
+                cookie_file = os.path.join(temp_dir, "cookies.txt")
+                with open(cookie_file, 'w') as f:
+                    f.write(cookie_content)
+                logger.info("Using cookies from YOUTUBE_COOKIES environment variable")
+                return {'cookiefile': cookie_file}
+            except Exception as e:
+                logger.error(f"Error creating cookie file from env var: {e}")
+        
+        return {}
+
     def extract_browser_cookies(self, browser: str = "chrome"):
-        """Extract cookies from browser"""
+        """Extract cookies from browser - disabled on Render"""
+        if IS_RENDER:
+            logger.info("Browser cookie extraction disabled on Render")
+            return None
+            
         if not BROWSER_COOKIES_AVAILABLE:
             return None
             
         try:
-            print(f"🍪 Extracting cookies from {browser}...")
+            logger.info(f"Extracting cookies from {browser}...")
             
             if browser.lower() == "chrome":
                 cj = browser_cookie3.chrome(domain_name='youtube.com')
@@ -214,18 +270,22 @@ class YouTubeTranscriberAPI:
             
             cookies = list(cj)
             if cookies:
-                print(f"✅ Found {len(cookies)} cookies from {browser}")
+                logger.info(f"Found {len(cookies)} cookies from {browser}")
                 return cj
             else:
-                print(f"⚠️ No cookies found in {browser}")
+                logger.warning(f"No cookies found in {browser}")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error extracting cookies from {browser}: {e}")
+            logger.error(f"Error extracting cookies from {browser}: {e}")
             return None
 
     def create_cookie_file(self, browser: str = "chrome"):
-        """Create a cookie file for yt-dlp"""
+        """Create a cookie file for yt-dlp - with Render support"""
+        if IS_RENDER:
+            # Use Render-specific cookie approach
+            return self.get_render_cookie_options()
+            
         cookies = self.extract_browser_cookies(browser)
         if not cookies:
             return None
@@ -244,7 +304,7 @@ class YouTubeTranscriberAPI:
             return cookie_file
             
         except Exception as e:
-            print(f"❌ Error creating cookie file: {e}")
+            logger.error(f"Error creating cookie file: {e}")
             return None
 
     def get_ydl_options(self, use_cookies: bool = True, browser: str = "chrome"):
@@ -266,19 +326,26 @@ class YouTubeTranscriberAPI:
             'no_warnings': True,
         }
         
-        # Strategy 1: Use browser cookies
-        if use_cookies and BROWSER_COOKIES_AVAILABLE:
+        # Strategy 1: Use browser cookies (disabled on Render)
+        if use_cookies and not IS_RENDER and BROWSER_COOKIES_AVAILABLE:
             cookie_file = self.create_cookie_file(browser)
             if cookie_file:
                 base_opts['cookiefile'] = cookie_file
-                print(f"🍪 Using cookies from {browser}")
+                logger.info(f"Using cookies from {browser}")
+        
+        # Strategy 2: Use Render-specific cookies
+        elif use_cookies and IS_RENDER:
+            cookie_opts = self.get_render_cookie_options()
+            if cookie_opts:
+                base_opts.update(cookie_opts)
+                logger.info("Using Render-specific cookies")
         
         return base_opts, temp_dir
 
     def load_whisper_model(self, model_name: str):
         """Load Whisper model with caching"""
         if model_name not in self.models:
-            print(f"🧠 Loading Whisper model: {model_name}")
+            logger.info(f"Loading Whisper model: {model_name}")
             try:
                 self.models[model_name] = pipeline(
                     "automatic-speech-recognition",
@@ -286,39 +353,46 @@ class YouTubeTranscriberAPI:
                     device=0 if self.device == "cuda" else -1,
                     torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
                 )
-                print(f"✅ Model {model_name} loaded successfully")
+                logger.info(f"Model {model_name} loaded successfully")
             except Exception as e:
-                print(f"❌ Error loading model {model_name}: {e}")
+                logger.error(f"Error loading model {model_name}: {e}")
                 raise e
         return self.models[model_name]
 
     def download_audio_with_fallback(self, url: str, use_cookies: bool = True, browser: str = "chrome") -> tuple:
-        """Download audio with multiple fallback strategies"""
+        """Download audio with multiple fallback strategies optimized for Render"""
+        # Auto-disable cookies on Render if not explicitly enabled
+        if IS_RENDER and not use_cookies:
+            use_cookies = False
+            logger.info("Render environment - cookie usage disabled")
+        
         strategies = []
         
-        # Strategy 1: Use yt-dlp's built-in cookie extraction
-        if use_cookies:
-            strategies.append(("builtin_cookies", browser))
+        # Render-specific strategies first
+        if IS_RENDER:
+            strategies.append(("render_no_cookies", None))
+            strategies.append(("render_with_headers", None))
+            strategies.append(("render_aggressive", None))
         
-        # Strategy 2: Use browser cookies (if available)
-        if use_cookies and BROWSER_COOKIES_AVAILABLE:
-            strategies.append(("manual_cookies", browser))
+        # Local strategies (only if not on Render)
+        if not IS_RENDER:
+            if use_cookies:
+                strategies.append(("builtin_cookies", browser))
+            
+            if use_cookies and BROWSER_COOKIES_AVAILABLE:
+                strategies.append(("manual_cookies", browser))
         
-        # Strategy 3: Use different user agents
+        # Universal strategies
         strategies.append(("user_agent_mobile", None))
         strategies.append(("user_agent_desktop", None))
-        
-        # Strategy 4: Basic download with headers
         strategies.append(("headers_only", None))
-        
-        # Strategy 5: Last resort - basic download
         strategies.append(("basic", None))
         
         last_error = None
         
         for i, (strategy, browser_name) in enumerate(strategies):
             try:
-                print(f"📥 Attempt {i+1}: Using {strategy} strategy...")
+                logger.info(f"Attempt {i+1}: Using {strategy} strategy...")
                 
                 # Get base options
                 temp_dir = tempfile.mkdtemp()
@@ -339,19 +413,58 @@ class YouTubeTranscriberAPI:
                 }
                 
                 # Apply strategy-specific options
-                if strategy == "builtin_cookies":
-                    # Use yt-dlp's built-in cookie extraction
+                if strategy == "builtin_cookies" and not IS_RENDER:
                     ydl_opts['cookiesfrombrowser'] = (browser_name, None, None, None)
-                    print(f"🍪 Using yt-dlp built-in cookie extraction from {browser_name}")
+                    logger.info(f"Using yt-dlp built-in cookie extraction from {browser_name}")
                 
-                elif strategy == "manual_cookies":
+                elif strategy == "manual_cookies" and not IS_RENDER:
                     cookie_file = self.create_cookie_file(browser_name)
                     if cookie_file:
                         ydl_opts['cookiefile'] = cookie_file
-                        print(f"🍪 Using manual cookie file from {browser_name}")
+                        logger.info(f"Using manual cookie file from {browser_name}")
                     else:
-                        print("⚠️ No cookies found, skipping manual cookie strategy")
+                        logger.warning("No cookies found, skipping manual cookie strategy")
                         continue
+                
+                elif strategy == "render_no_cookies":
+                    # Minimal options for Render
+                    ydl_opts.update({
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (compatible; Render-Transcriber/1.0)',
+                            'Accept': '*/*'
+                        }
+                    })
+                
+                elif strategy == "render_with_headers":
+                    # More comprehensive headers for Render
+                    ydl_opts.update({
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                            'Accept-Encoding': 'gzip, deflate',
+                            'DNT': '1',
+                            'Connection': 'keep-alive',
+                        }
+                    })
+                
+                elif strategy == "render_aggressive":
+                    # Aggressive approach for difficult videos
+                    ydl_opts.update({
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'DNT': '1',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'none',
+                            'Sec-Fetch-User': '?1',
+                        }
+                    })
                 
                 elif strategy == "user_agent_mobile":
                     ydl_opts['http_headers'] = {
@@ -387,8 +500,8 @@ class YouTubeTranscriberAPI:
                         'availability': info.get('availability', 'Unknown')
                     }
 
-                    print(f"📺 Video: {video_info['title']}")
-                    print(f"⏱️ Duration: {video_info['duration']} seconds")
+                    logger.info(f"Video: {video_info['title']}")
+                    logger.info(f"Duration: {video_info['duration']} seconds")
                     
                     # If info extraction worked, try downloading
                     ydl.download([url])
@@ -403,12 +516,12 @@ class YouTubeTranscriberAPI:
                 if not downloaded_file or not os.path.exists(downloaded_file):
                     raise Exception("Downloaded audio file not found")
 
-                print(f"✅ Success with {strategy} strategy!")
+                logger.info(f"Success with {strategy} strategy!")
                 return downloaded_file, video_info, temp_dir, strategy
 
             except Exception as e:
                 last_error = e
-                print(f"❌ {strategy} strategy failed: {str(e)}")
+                logger.error(f"{strategy} strategy failed: {str(e)}")
                 if 'temp_dir' in locals() and os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 continue
@@ -430,7 +543,7 @@ class YouTubeTranscriberAPI:
             # Load model
             pipe = self.load_whisper_model(request.whisper_model)
 
-            print("🔁 Transcribing audio...")
+            logger.info("Transcribing audio...")
 
             # Transcribe
             result = pipe(
@@ -449,8 +562,9 @@ class YouTubeTranscriberAPI:
                 "video_info": video_info,
                 "retry_info": {
                     "strategy_used": strategy,
-                    "cookies_used": request.use_cookies and strategy == "cookies",
-                    "browser": request.browser if strategy == "cookies" else None
+                    "cookies_used": request.use_cookies and "cookies" in strategy,
+                    "browser": request.browser if "cookies" in strategy else None,
+                    "environment": "render" if IS_RENDER else "local"
                 }
             }
 
@@ -460,11 +574,11 @@ class YouTubeTranscriberAPI:
             if request.output_format in ["json", "both"]:
                 response_data["detailed"] = result
 
-            print(f"✅ Transcription completed for: {video_info['title']}")
+            logger.info(f"Transcription completed for: {video_info['title']}")
             return TranscriptionResponse(**response_data)
 
         except Exception as e:
-            print(f"❌ Error in transcription: {str(e)}")
+            logger.error(f"Error in transcription: {str(e)}")
             
             # Provide helpful error messages
             error_message = str(e)
@@ -483,6 +597,9 @@ class YouTubeTranscriberAPI:
             # Cleanup
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+# ... (keep the rest of your utility functions the same: install_ffmpeg, install_dependencies, run_api_server, etc.)
+# The utility functions remain unchanged from your original code
 
 def install_ffmpeg():
     """Install FFmpeg automatically based on the operating system"""
@@ -655,182 +772,28 @@ def run_api_server(host: str = "0.0.0.0", port: int = 8000):
     """Run the enhanced API server"""
     transcriber_api = YouTubeTranscriberAPI()
 
-    print("🎬 Enhanced YouTube Transcriber API (CORS + Cookies)")
+    print("🎬 Enhanced YouTube Transcriber API (Render Optimized)")
     print("=" * 60)
     print(f"🏠 Local URL: http://localhost:{port}")
     print(f"🌐 Network URL: http://{host}:{port}")
+    print(f"🏭 Environment: {'Render' if IS_RENDER else 'Local'}")
     print("✅ CORS enabled - web browsers can access this API")
-    print(f"🍪 Cookie support: {'✅' if BROWSER_COOKIES_AVAILABLE else '❌ (install browser-cookie3)'}")
+    print(f"🍪 Cookie support: {'✅' if BROWSER_COOKIES_AVAILABLE else '❌'}")
     print("📋 Available endpoints:")
     print(f"  GET  http://localhost:{port}/ - API info")
     print(f"  GET  http://localhost:{port}/health - Health check")
     print(f"  POST http://localhost:{port}/transcribe - Transcribe video")
     print(f"  GET  http://localhost:{port}/models - Available models")
-    print(f"  POST http://localhost:{port}/test-cookies - Test cookie extraction")
+    print(f"  GET  http://localhost:{port}/environment - Environment info")
     print("=" * 60)
-    print("💡 Tips:")
-    print("  - Set use_cookies=true to bypass bot detection")
-    print("  - Try different browsers if one doesn't work")
-    print("  - Age-restricted videos need browser login")
+    print("💡 Render Tips:")
+    print("  - Set YOUTUBE_COOKIES environment variable for authentication")
+    print("  - Use use_cookies=false for public videos")
+    print("  - Age-restricted videos need manual cookie setup")
     print("=" * 60)
 
     # Run server
     uvicorn.run(transcriber_api.app, host=host, port=port, log_level="info")
 
-def start_api_in_background(host: str = "0.0.0.0", port: int = 8000):
-    """Start API server in background thread"""
-    def run_server():
-        run_api_server(host=host, port=port)
-
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
-
-    time.sleep(5)
-    print(f"✅ Enhanced API server running in background on http://localhost:{port}")
-    return thread
-
-def quick_fix_cookie_test(url: str = "https://www.youtube.com/watch?v=RGaW82k4dK4"):
-    """Quick test to see which cookie method works"""
-    browsers = ["chrome", "firefox", "edge", "safari"]
-    
-    print("🔧 Quick Cookie Fix Test")
-    print("=" * 40)
-    
-    for browser in browsers:
-        print(f"\n🔍 Testing {browser} cookies...")
-        
-        try:
-            # Test yt-dlp's built-in cookie extraction
-            temp_dir = tempfile.mkdtemp()
-            
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'cookiesfrombrowser': (browser, None, None, None),
-                'format': 'bestaudio/best',
-                'extract_flat': True,  # Just extract info
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-            print(f"✅ {browser} cookies work! Video: {info.get('title', 'Unknown')}")
-            return browser  # Return the working browser
-            
-        except Exception as e:
-            print(f"❌ {browser} cookies failed: {str(e)[:100]}...")
-        
-        finally:
-            if 'temp_dir' in locals() and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-    
-    print("\n❌ No browser cookies are working")
-    print("💡 Solutions:")
-    print("   1. Make sure you're logged into YouTube in your browser")
-    print("   2. Close and reopen your browser")
-    print("   3. Clear YouTube cookies and login again")
-    print("   4. Try using a VPN if you're in a restricted region")
-    
-    return None
-
-
-def create_manual_cookie_file():
-    """Create a manual cookie file - user provides their own cookies"""
-    print("🍪 Manual Cookie Setup")
-    print("=" * 30)
-    print("1. Go to YouTube in your browser")
-    print("2. Open Developer Tools (F12)")
-    print("3. Go to Application/Storage > Cookies > https://youtube.com")
-    print("4. Find these important cookies and copy their values:")
-    
-    cookies_needed = [
-        "SAPISID",
-        "APISID", 
-        "HSID",
-        "SSID",
-        "SID",
-        "__Secure-3PAPISID",
-        "__Secure-3PSID"
-    ]
-    
-    cookie_values = {}
-    for cookie in cookies_needed:
-        value = input(f"Enter {cookie} value (or press Enter to skip): ").strip()
-        if value:
-            cookie_values[cookie] = value
-    
-    if not cookie_values:
-        print("No cookies provided")
-        return None
-    
-    # Create cookie file
-    temp_dir = tempfile.mkdtemp()
-    cookie_file = os.path.join(temp_dir, "manual_cookies.txt")
-    
-    with open(cookie_file, 'w') as f:
-        f.write("# Netscape HTTP Cookie File\n")
-        for name, value in cookie_values.items():
-            f.write(f".youtube.com\tTRUE\t/\tTRUE\t0\t{name}\t{value}\n")
-    
-    print(f"✅ Cookie file created: {cookie_file}")
-    return cookie_file
-
-def setup_complete_environment():
-    """Complete setup including FFmpeg and all dependencies"""
-    print("🎯 Complete YouTube Transcriber Setup")
-    print("=" * 50)
-    
-    # Step 1: Install Python dependencies
-    print("📦 Step 1: Installing Python packages...")
-    install_success = install_dependencies()
-    
-    # Step 2: Check/Install FFmpeg
-    print("\n🎥 Step 2: Checking FFmpeg...")
-    ffmpeg_success = install_ffmpeg()
-    
-    # Step 3: Test everything
-    print("\n🧪 Step 3: Testing installation...")
-    
-    # Test imports
-    try:
-        import yt_dlp
-        import transformers
-        import torch
-        import fastapi
-        print("✅ All Python imports successful")
-        python_ok = True
-    except ImportError as e:
-        print(f"❌ Import failed: {e}")
-        python_ok = False
-    
-    # Test FFmpeg
-    try:
-        result = subprocess.run(['ffmpeg', '-version'], 
-                              capture_output=True, text=True, timeout=5)
-        ffmpeg_ok = result.returncode == 0
-        if ffmpeg_ok:
-            print("✅ FFmpeg is working")
-        else:
-            print("❌ FFmpeg not working")
-    except:
-        ffmpeg_ok = False
-        print("❌ FFmpeg not found")
-    
-    # Summary
-    print("\n" + "="*50)
-    print("🏁 Setup Complete!")
-    print(f"Python packages: {'✅' if python_ok else '❌'}")
-    print(f"FFmpeg: {'✅' if ffmpeg_ok else '❌'}")
-    
-    if python_ok and ffmpeg_ok:
-        print("🎉 Everything is ready! You can now:")
-        print("   • Run: run_api_server()")
-        print("   • Or: start_api_in_background()")
-        return True
-    else:
-        print("⚠️ Some components failed. Check the errors above.")
-        return False
-
 if __name__ == "__main__":
     run_api_server()
-
